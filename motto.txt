@@ -1,0 +1,488 @@
+================================================================================
+  STOCK RECOMMENDATION SYSTEM - PORTFOLIO PULSE
+  Requirements and Architecture
+================================================================================
+
+MOTTO
+-----
+Monitor, explain, never trade.
+Every number grounded. Every prediction labeled. No code path to orders.
+
+
+================================================================================
+1. OBJECTIVE
+================================================================================
+
+An AI agent that monitors a Groww brokerage portfolio and produces grounded,
+explainable reports:
+  - price-drop alerts
+  - 6-month company performance summaries
+  - IPO updates with clearly labeled listing-price estimates
+
+It uses only the official Groww API through a self-built MCP server. It has no
+autonomous trading capability.
+
+Nothing this system produces is financial advice.
+
+
+================================================================================
+2. SCOPE
+================================================================================
+
+IN SCOPE
+  - Read-only portfolio monitoring (holdings, live quotes, historical candles)
+  - Price-drop detection and alerting against configurable thresholds
+  - 6-month per-holding performance summaries grounded in news/filings (RAG)
+  - IPO calendar tracking and listing-price range estimation (labeled speculative)
+  - LangGraph agent that compiles everything into one report
+  - Guardrails for groundedness, disclaimers and tool restrictions
+  - Streamlit dashboard with a reasoning trace
+
+OUT OF SCOPE
+  - Order placement, modification or cancellation (excluded at the code level)
+  - Personalized buy, sell or hold advice
+  - Any autonomous action on the brokerage account
+  - Multi-user or multi-tenant support (single user, single portfolio in v1)
+  - Real-time tick-level trading signals
+
+
+================================================================================
+3. FUNCTIONAL REQUIREMENTS
+================================================================================
+
+FR-1  PORTFOLIO OVERVIEW
+      Show current holdings, quantity, average price, current price and
+      unrealized P&L, fetched live through MCP tool calls.
+
+FR-2  PRICE-DROP ALERTS
+      - Thresholds configurable as percent or absolute value
+      - Per holding or portfolio-wide
+      - Evaluated on daily change and weekly change
+      - Triggered on every polling cycle and on demand
+
+FR-3  6-MONTH PERFORMANCE SUMMARY
+      - Per-holding price chart for the last 6 months
+      - Metrics computed in Python: return, max drawdown, volatility
+      - Narrative written by the LLM using only computed metrics and
+        retrieved news/filings
+      - Every narrative cites its sources (URL and date)
+
+FR-4  IPO TRACKER
+      - Upcoming and recent IPOs: name, dates, price band, lot size,
+        subscription status
+      - Estimated listing-price range (low/high) from a transparent heuristic
+        (subscription multiple, sector, market conditions)
+      - Assumptions and a disclaimer shown with every estimate
+
+FR-5  REPORT COMPILATION
+      - One consolidated report, generated on demand or on schedule
+      - Every factual claim linked to its source
+
+FR-6  REASONING TRACE
+      - For every run: nodes visited, tool calls with inputs/outputs,
+        retrieved documents, guardrail verdicts and retry count
+
+FR-7  MOCK MODE
+      - When USE_MOCK_GROWW=true, the MCP server returns sample data with the
+        same tool signatures, so development can continue without API access
+
+
+================================================================================
+4. NON-FUNCTIONAL REQUIREMENTS
+================================================================================
+
+NFR-1  SECURITY
+       - Credentials only from environment variables or a secrets manager
+       - Credentials never logged, displayed or committed
+       - MCP server implements no write or order endpoints
+
+NFR-2  RELIABILITY
+       - Handle daily Groww access-token expiry with automatic re-auth
+       - Degrade gracefully when the Groww API, news source or IPO source is
+         unavailable (report what is missing instead of failing)
+
+NFR-3  AUDITABILITY
+       - Every report traceable to underlying tool outputs and sources
+       - Run traces stored locally
+
+NFR-4  RATE LIMITS AND CACHING
+       - Respect Groww API rate limits
+       - Cache quotes and candles between polling cycles
+
+NFR-5  TRANSPARENCY
+       - Every prediction labeled "Illustrative estimate, not financial advice"
+       - Every prediction states its range and assumptions
+
+NFR-6  PERFORMANCE
+       - Full report for a 20-holding portfolio in under 2 minutes
+       - Dashboard loads cached data in under 3 seconds
+
+NFR-7  HARDWARE
+       - Runs locally on CPU, no GPU required
+       - 8 GB RAM minimum, 16 GB recommended
+
+
+================================================================================
+5. SOFTWARE REQUIREMENTS
+================================================================================
+
+RUNTIME
+  - Python 3.12
+  - uv (or pip) for dependency management
+
+PYTHON PACKAGES
+  growwapi                  Official Groww SDK
+  mcp                       MCP Python SDK (FastMCP server)
+  langgraph                 Agent orchestration
+  langchain-core            Core LangChain abstractions
+  langchain-anthropic       Claude LLM integration (or langchain-openai)
+  langchain-mcp-adapters    Load MCP tools into LangGraph
+  chromadb                  Local vector store
+  sentence-transformers     Local CPU embeddings (all-MiniLM-L6-v2)
+  feedparser                News RSS ingestion
+  requests                  HTTP for IPO and disclosure sources
+  beautifulsoup4            HTML parsing for IPO pages
+  pandas                    Metric computation
+  numpy                     Metric computation
+  pydantic                  Structured outputs and validation
+  python-dotenv             Environment configuration
+  apscheduler               Price-drop polling loop
+  streamlit                 Dashboard
+  plotly                    Charts
+  pytest                    Tests
+
+EXTERNAL SERVICES
+  - Groww API key and secret (Groww developer portal)
+  - LLM API key (Anthropic or OpenAI)
+
+ENVIRONMENT VARIABLES
+  GROWW_API_KEY              Groww API key
+  GROWW_API_SECRET           Groww API secret
+  ANTHROPIC_API_KEY          LLM API key
+  USE_MOCK_GROWW             true/false, use sample data
+  PRICE_DROP_THRESHOLD_PCT   Default alert threshold, e.g. 5
+  POLL_INTERVAL_MINUTES      Polling cadence, e.g. 15
+  MAX_SELF_CHECK_RETRIES     Self-check loop cap, e.g. 3
+  LLM_MODEL                  Model used by the agent, default claude-sonnet-5-5
+  CHROMA_PERSIST_DIR         Vector store location, default storage/chroma
+  EMBEDDING_MODEL            Embedding model, default all-MiniLM-L6-v2
+
+
+================================================================================
+6. DATA SOURCES
+================================================================================
+
+  Source                          Provides                         Access
+  ------------------------------  -------------------------------  ----------
+  Groww official API (growwapi)   Holdings, quotes, OHLC candles   Read-only
+  News RSS (e.g. Google News)     Company news for RAG             Read-only
+  NSE/BSE disclosures             Filings and announcements        Read-only
+  Public IPO listing pages        IPO calendar and subscription    Read-only
+
+Open items: confirm Groww API access terms, and pick final IPO and
+news/filings sources.
+
+
+================================================================================
+7. ARCHITECTURE
+================================================================================
+
+7.1 HIGH-LEVEL VIEW
+
+    +--------------------+        +--------------------+
+    | Streamlit dashboard|        | Scheduler          |
+    | (app.py)           |        | (price-drop poll)  |
+    +---------+----------+        +---------+----------+
+              |                             |
+              +-------------+---------------+
+                            |
+                            v
+                +-----------------------+
+                |   LangGraph agent     |
+                |   (agent/graph.py)    |
+                +-----------+-----------+
+                            |
+                            v
+                +-----------------------+
+                |      Guardrails       |
+                | (agent/guardrails.py) |
+                +---+-------+-------+---+
+                    |       |       |
+          +---------+       |       +-----------+
+          v                 v                   v
+ +-----------------+ +--------------+ +-------------------+
+ | Custom MCP      | | RAG retriever| | IPO fetcher       |
+ | server          | | (rag/)       | | (data/)           |
+ | (read-only)     | +------+-------+ +---------+---------+
+ +--------+--------+        |                   |
+          |                 v                   v
+          v          +--------------+   +------------------+
+ +-----------------+ | Chroma       |   | Public IPO pages |
+ | Groww API       | | vector store |   +------------------+
+ | (growwapi SDK)  | +------+-------+
+ +-----------------+        ^
+                            |
+                   +--------+--------+
+                   | rag/ingest.py   |
+                   | news + filings  |
+                   +-----------------+
+
+
+7.1a MERMAID DIAGRAM (paste into https://mermaid.live or view in README.md)
+
+flowchart TB
+    User(["User"])
+    UI["Streamlit dashboard<br/>holdings, alerts, charts,<br/>IPOs, reasoning trace"]
+    SCH["APScheduler<br/>price-drop polling<br/>market hours only"]
+    AG["LangGraph agent<br/>typed state graph"]
+    LLM["Hosted LLM<br/>Claude or OpenAI"]
+    OUT{{"Output guardrails<br/>groundedness check<br/>Pydantic schema<br/>prediction disclaimer"}}
+    G1{{"Tool allowlist<br/>guardrail"}}
+    MCP["Custom MCP server, FastMCP<br/>get_portfolio<br/>get_quote<br/>get_historical_candles"]
+    BLOCKED["place / modify / cancel order<br/>NOT IMPLEMENTED"]
+    RET["RAG retriever<br/>last 6 months, top-k"]
+    VDB[("Chroma vector store<br/>symbol, source_url, date")]
+    ING["Ingest pipeline<br/>sanitize, chunk,<br/>embed with MiniLM on CPU"]
+    IPOF["IPO fetcher"]
+    GROWW[("Groww official API<br/>growwapi SDK")]
+    NEWS[("News RSS<br/>NSE / BSE disclosures")]
+    IPOS[("Public IPO pages")]
+
+    User --> UI
+    UI -->|"generate report"| AG
+    SCH -->|"scheduled run"| AG
+    AG <-->|"reasoning"| LLM
+    AG -->|"tool calls"| G1
+    AG -->|"query"| RET
+    AG --> IPOF
+    G1 -->|"allowed"| MCP
+    G1 -.->|"rejected"| BLOCKED
+    MCP --> GROWW
+    RET --> VDB
+    NEWS --> ING
+    ING --> VDB
+    IPOF --> IPOS
+    AG -->|"draft report"| OUT
+    OUT -.->|"validated report + trace"| UI
+
+    classDef present fill:#e3f2fd,stroke:#1e88e5,color:#0d47a1
+    classDef orch fill:#ede7f6,stroke:#5e35b1,color:#311b92
+    classDef guard fill:#fff4d6,stroke:#b7791f,color:#7c4a03
+    classDef tool fill:#e8f5e9,stroke:#43a047,color:#1b5e20
+    classDef ext fill:#eceff1,stroke:#546e7a,color:#263238
+    classDef blocked fill:#fde2e2,stroke:#c0392b,color:#c0392b,stroke-dasharray: 5 5
+    class User,UI,SCH present
+    class AG,LLM orch
+    class G1,OUT guard
+    class MCP,RET,VDB,ING,IPOF tool
+    class GROWW,NEWS,IPOS ext
+    class BLOCKED blocked
+
+
+7.2 LAYERS
+
+  Layer           Component            Responsibility
+  --------------  -------------------  ----------------------------------------
+  Presentation    Streamlit            Holdings, alerts, charts, IPOs, trace
+  Orchestration   LangGraph agent      Runs the graph, manages state, retries
+  Safety          Guardrails           Allowlist, sanitization, groundedness,
+                                       schema validation, disclaimers
+  Data access     Custom MCP server    Read-only wrapper over growwapi
+  Knowledge       RAG (Chroma)         Grounded news and filings retrieval
+  External data   IPO fetcher          IPO calendar and subscription data
+  Control flow    Scheduler            Periodic price-drop monitoring
+
+
+7.3 AGENT GRAPH
+
+  START
+    |
+    v
+  fetch_portfolio ........... MCP: get_portfolio, get_quote
+    |
+    v
+  detect_price_drops ........ compare against thresholds
+    |
+    v
+  retrieve_news ............. RAG query per holding
+    |
+    v
+  summarize_performance ..... MCP: get_historical_candles
+    |                         metrics in Python, narrative by LLM
+    v
+  fetch_ipo_calendar ........ IPO fetcher
+    |
+    v
+  estimate_listing_range .... heuristic range + assumptions
+    |
+    v
+  self_check ................ groundedness + schema validation
+    |
+    +-- fail and retries < MAX --> back to retrieve_news / regenerate
+    |
+    +-- fail and retries = MAX --> flag report as partially unverified
+    |
+    +-- pass
+    v
+  compile_report
+    |
+    v
+  END
+
+
+7.4 AGENT STATE
+
+  portfolio          list of holdings with quotes
+  price_alerts       list of triggered alerts
+  candles            6-month OHLC per holding
+  metrics            computed return, drawdown, volatility per holding
+  retrieved_docs     RAG chunks with source URL and date
+  summaries          per-holding narratives with citations
+  ipos               IPO records
+  ipo_estimates      low/high range, assumptions, disclaimer
+  guardrail_results  verdicts per check
+  retry_count        self-check iterations used
+  trace              ordered log of nodes, tool calls and outputs
+  report             final structured report
+
+
+7.5 MCP SERVER TOOLS
+
+  Tool                    Input                      Output
+  ----------------------  -------------------------  -------------------------
+  get_portfolio           none                       holdings with qty, avg
+                                                     price, current price, P&L
+  get_quote               symbol                     LTP, day change, volume
+  get_historical_candles  symbol, interval, from, to OHLCV list
+
+  Not implemented, by design: place_order, modify_order, cancel_order.
+
+
+7.6 GUARDRAILS
+
+  Guardrail             Stage           Behavior
+  --------------------  --------------  ----------------------------------------
+  Tool allowlist        Pre-execution   Reject any tool outside the 3 read-only
+                                        tools
+  Content sanitization  Input           Strip instruction-like text from news
+                                        and web content (prompt-injection
+                                        defense)
+  Groundedness check    Output          Every number in a narrative must match
+                                        tool output or a computed metric
+  Schema validation     Output          Report must validate against the
+                                        Pydantic schema
+  Prediction label      Output          Every estimate gets range, assumptions
+                                        and "not financial advice" label
+
+
+7.7 LOOPS
+
+  Self-check loop
+    Runs after report drafting. If grounding or schema checks fail, the agent
+    re-retrieves or regenerates. Capped at MAX_SELF_CHECK_RETRIES, after which
+    the report is flagged instead of looping forever.
+
+  Monitoring loop
+    APScheduler job every POLL_INTERVAL_MINUTES during market hours
+    (09:15-15:30 IST, trading days). Fetches quotes, checks thresholds, and
+    pushes alerts to the dashboard.
+
+
+7.8 RAG PIPELINE
+
+  Ingest:   fetch news/filings per holding -> clean -> sanitize -> chunk
+            (~500 tokens, 50 overlap) -> embed (all-MiniLM-L6-v2) -> store in
+            Chroma with metadata {symbol, source_url, published_date}
+  Retrieve: query by symbol + topic -> filter last 6 months -> top-k chunks
+  Use:      chunks passed to the summarizer with citation requirements
+
+
+7.9 KEY DESIGN DECISIONS
+
+  - Numbers are computed in Python, never by the LLM. This makes the
+    groundedness check simple and reliable.
+  - Custom MCP server instead of third-party servers. Only the official
+    Groww SDK is trusted, and we control exactly which tools exist.
+  - IPO estimates use a transparent heuristic instead of an ML model, so the
+    range and its assumptions can be explained.
+  - Custom guardrails instead of a framework, for speed and explainability.
+
+
+================================================================================
+8. PROJECT STRUCTURE
+================================================================================
+
+  StockRecommendationSystem/
+  |-- mcp_server/
+  |   `-- groww_server.py       read-only MCP tools over growwapi
+  |-- agent/
+  |   |-- graph.py              LangGraph state and nodes
+  |   `-- guardrails.py         allowlist, groundedness, disclaimers
+  |-- rag/
+  |   |-- ingest.py             fetch, chunk and embed news/filings
+  |   `-- retriever.py
+  |-- data/
+  |   `-- ipo_fetcher.py        IPO calendar source
+  |-- scheduler/
+  |   `-- monitor.py            price-drop polling loop
+  |-- tests/
+  |-- app.py                    Streamlit entry point
+  |-- config.py
+  |-- requirements.txt
+  |-- .env.example
+  |-- README.md
+  `-- motto.txt
+
+
+================================================================================
+9. DELIVERY PLAN (3 DAYS)
+================================================================================
+
+  Before Day 1  Groww API access, LLM key, environment setup
+
+  Day 1         Custom MCP server, LangGraph skeleton, Streamlit portfolio
+                view, tool allowlist guardrail
+
+  Day 2         Price-drop detection, RAG pipeline, 6-month performance
+                summaries, output guardrails
+
+  Day 3         IPO tracker and estimates, self-check loop, scheduler, trace
+                panel, tests, demo
+
+  If behind, cut in this order:
+    1. Scheduled polling (keep on-demand)
+    2. IPO listing-price estimates (keep IPO data)
+    3. Trace panel (log to console)
+    4. Self-check retries (keep the check, fail without retry)
+
+  Never cut: read-only MCP server, tool allowlist, groundedness check,
+  disclaimers.
+
+
+================================================================================
+10. SUCCESS CRITERIA
+================================================================================
+
+  [ ] No code path can place, modify or cancel an order
+  [ ] Every numeric claim traces to a tool call or computed metric
+  [ ] Every prediction shows a range, assumptions and a disclaimer
+  [ ] Self-check loop never exceeds its retry cap
+  [ ] Dashboard works end to end against a real Groww account (or mock mode)
+  [ ] Tests cover the allowlist, groundedness check and MCP tools
+
+
+================================================================================
+11. RISKS
+================================================================================
+
+  Risk                                 Mitigation
+  -----------------------------------  ---------------------------------------
+  Groww API access delayed             Mock mode with identical tool signatures
+  Unreliable IPO data source           Show IPO data without estimates
+  LLM invents numbers                  Python-computed metrics + groundedness
+                                       check
+  Prompt injection via news content    Content sanitization before retrieval
+  Users treat estimates as advice      Mandatory labels, ranges, assumptions
+  Third-party code touching account    Only the official SDK, self-built MCP
+
+================================================================================

@@ -1,0 +1,21 @@
+# Environment and secrets
+.env
+.venv/
+venv/
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Local data
+storage/
+traces/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
