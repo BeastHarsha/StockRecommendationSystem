@@ -10,7 +10,7 @@ REQUIRED_MODULES = [
     "mcp.server.fastmcp",
     "langgraph",
     "langchain_core",
-    "langchain_anthropic",
+    "langchain_openai",
     "langchain_mcp_adapters",
     "langchain_mcp_adapters.client",
     "chromadb",

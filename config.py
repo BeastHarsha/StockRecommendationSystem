@@ -31,7 +31,8 @@ def _get_number(name: str, default: float, cast: type, minimum: float):
 class Settings:
     groww_api_key: str
     groww_api_secret: str
-    anthropic_api_key: str
+    groww_access_token: str
+    openai_api_key: str
     llm_model: str
     use_mock_groww: bool
     price_drop_threshold_pct: float
@@ -42,13 +43,13 @@ class Settings:
 
     def missing_credentials(self) -> list[str]:
         missing = []
-        if not self.use_mock_groww:
+        if not self.use_mock_groww and not self.groww_access_token:
             if not self.groww_api_key:
                 missing.append("GROWW_API_KEY")
             if not self.groww_api_secret:
                 missing.append("GROWW_API_SECRET")
-        if not self.anthropic_api_key:
-            missing.append("ANTHROPIC_API_KEY")
+        if not self.openai_api_key:
+            missing.append("OPENAI_API_KEY")
         return missing
 
 
@@ -63,8 +64,9 @@ def load_settings(env_file: Path | None = ROOT_DIR / ".env") -> Settings:
     return Settings(
         groww_api_key=os.getenv("GROWW_API_KEY", "").strip(),
         groww_api_secret=os.getenv("GROWW_API_SECRET", "").strip(),
-        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", "").strip(),
-        llm_model=os.getenv("LLM_MODEL") or "claude-sonnet-5-5",
+        groww_access_token=os.getenv("GROWW_ACCESS_TOKEN", "").strip(),
+        openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
+        llm_model=os.getenv("LLM_MODEL") or "gpt-6-luna",
         use_mock_groww=_get_bool("USE_MOCK_GROWW", default=True),
         price_drop_threshold_pct=_get_number("PRICE_DROP_THRESHOLD_PCT", 5, float, minimum=0.01),
         poll_interval_minutes=_get_number("POLL_INTERVAL_MINUTES", 15, int, minimum=1),

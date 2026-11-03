@@ -11,27 +11,29 @@ def build_holdings(holdings: list[dict], quotes: dict[str, dict]) -> list[dict]:
     rows = []
     for h in holdings:
         quote = quotes.get(h["symbol"])
-        if quote is None:
-            continue
-        qty, avg, last = float(h["quantity"]), float(h["average_price"]), float(quote["last_price"])
-        invested, current = qty * avg, qty * last
+        qty, avg = float(h["quantity"]), float(h["average_price"])
+        invested = qty * avg
+        last = float(quote["last_price"]) if quote and quote.get("last_price") is not None else None
+        current = qty * last if last is not None else None
         rows.append({
             "symbol": h["symbol"],
             "company_name": h.get("company_name") or h["symbol"],
             "quantity": qty,
             "average_price": _r(avg),
-            "last_price": _r(last),
-            "day_change_pct": _r(float(quote.get("day_change_pct") or 0.0)),
+            "last_price": _r(last) if last is not None else None,
+            "day_change_pct": _r(float(quote["day_change_pct"])) if quote and quote.get("day_change_pct") is not None else None,
             "invested": _r(invested),
-            "current_value": _r(current),
-            "pnl": _r(current - invested),
-            "pnl_pct": _r((current - invested) / invested * 100) if invested else 0.0,
+            "current_value": _r(current) if current is not None else None,
+            "pnl": _r(current - invested) if current is not None else None,
+            "pnl_pct": _r((current - invested) / invested * 100) if current is not None and invested else (0.0 if current is not None else None),
         })
     return rows
 
 
 def portfolio_totals(rows: list[dict]) -> dict:
     invested = sum(r["invested"] for r in rows)
+    if any(r["current_value"] is None for r in rows):
+        return {"invested": _r(invested), "current_value": None, "pnl": None, "pnl_pct": None}
     current = sum(r["current_value"] for r in rows)
     return {
         "invested": _r(invested),

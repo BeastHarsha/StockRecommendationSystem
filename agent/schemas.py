@@ -13,19 +13,19 @@ class Holding(BaseModel):
     company_name: str
     quantity: float
     average_price: float
-    last_price: float
-    day_change_pct: float
+    last_price: float | None
+    day_change_pct: float | None
     invested: float
-    current_value: float
-    pnl: float
-    pnl_pct: float
+    current_value: float | None
+    pnl: float | None
+    pnl_pct: float | None
 
 
 class Totals(BaseModel):
     invested: float
-    current_value: float
-    pnl: float
-    pnl_pct: float
+    current_value: float | None
+    pnl: float | None
+    pnl_pct: float | None
 
 
 class PriceAlert(BaseModel):

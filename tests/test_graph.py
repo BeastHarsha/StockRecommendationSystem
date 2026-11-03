@@ -3,8 +3,9 @@ import dataclasses
 
 import pytest
 from langchain_core.messages import AIMessage
+from langchain_core.tools import StructuredTool
 
-from agent.graph import run_with_toolbox
+from agent.graph import billing_error_message, make_llm, message_text, run_with_toolbox
 from agent.guardrails import GuardedToolbox
 from config import load_settings
 from data.ipo_fetcher import MockIpoSource
@@ -42,6 +43,17 @@ def run(settings, **kwargs):
     return asyncio.run(run_with_toolbox(GuardedToolbox(make_tools(include_order_tool=True)), settings, **kwargs))
 
 
+def test_openai_model_uses_luna_responses_api(settings):
+    configured = dataclasses.replace(settings, openai_api_key="test-key")
+    llm = make_llm(configured)
+
+    assert llm.model_name == "gpt-6-luna"
+    assert llm.use_responses_api is True
+    assert llm.reasoning_effort == "none"
+    assert llm.max_retries == 0
+    assert message_text(AIMessage(content=[{"type": "output_text", "text": "Luna answer"}])) == "Luna answer"
+
+
 def test_report_without_llm_uses_grounded_templates(settings):
     report = run(settings, ipo_source=MockIpoSource())
 
@@ -56,6 +68,25 @@ def test_report_without_llm_uses_grounded_templates(settings):
     allowlist = next(g for g in report.guardrails if g.check == "tool_allowlist")
     assert not allowlist.passed and "place_order" in allowlist.detail  # order tool dropped at load
     assert report.errors == []
+
+
+def test_report_keeps_holdings_when_quotes_are_forbidden(settings):
+    async def forbidden_quote(symbol: str) -> dict:
+        raise PermissionError("Access forbidden for this request")
+
+    tools = [
+        StructuredTool.from_function(coroutine=forbidden_quote, name="get_quote", description="quote")
+        if tool.name == "get_quote" else tool
+        for tool in make_tools()
+    ]
+    report = asyncio.run(run_with_toolbox(GuardedToolbox(tools), settings))
+
+    assert len(report.holdings) == 5
+    assert all(holding.current_value is None for holding in report.holdings)
+    assert report.totals.invested > 0
+    assert report.totals.current_value is None and report.totals.pnl is None
+    assert len(report.errors) == 1
+    assert "denied all live quote requests" in report.errors[0]
 
 
 def test_self_check_loop_regenerates_ungrounded_summaries(settings):
@@ -82,6 +113,32 @@ def test_llm_failure_falls_back_to_template(settings):
     report = run(settings, llm=FailingLLM())
     assert all(s.narrative_source == "template" and s.verified for s in report.summaries)
     assert len([e for e in report.errors if "used template instead" in e]) == 5
+
+
+def test_no_credits_stops_model_calls_and_uses_templates(settings):
+    class NoCreditsLLM:
+        calls = 0
+
+        async def ainvoke(self, messages):
+            self.calls += 1
+            raise RuntimeError("Error code: 429 - You have no credits remaining.")
+
+    llm = NoCreditsLLM()
+    report = run(settings, llm=llm)
+
+    assert llm.calls == 1
+    assert len(report.errors) == 1
+    assert "credits are exhausted" in report.errors[0]
+    assert all(s.narrative_source == "template" and s.verified for s in report.summaries)
+    assert next(t for t in report.trace if t.step == "summarize_performance").data["llm_unavailable"]
+
+
+def test_billing_codes_are_distinct_from_temporary_rate_limits():
+    class CodedError(Exception):
+        body = {"error": {"code": "credit_balance_exhausted"}}
+
+    assert "credits are exhausted" in billing_error_message(CodedError("429"))
+    assert billing_error_message(RuntimeError("429 - Rate limit reached for requests")) is None
 
 
 class FakeRetriever:

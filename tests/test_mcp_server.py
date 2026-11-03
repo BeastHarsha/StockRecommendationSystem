@@ -11,6 +11,7 @@ from tests.conftest import AS_OF
 @pytest.fixture(autouse=True)
 def mock_mode(monkeypatch):
     monkeypatch.setenv("USE_MOCK_GROWW", "true")
+    monkeypatch.setenv("GROWW_ACCESS_TOKEN", "")
     groww_server.get_provider.cache_clear()
     yield
     groww_server.get_provider.cache_clear()
@@ -54,6 +55,20 @@ def test_live_mode_requires_credentials(monkeypatch):
     groww_server.get_provider.cache_clear()
     with pytest.raises(RuntimeError, match="GROWW_API_KEY"):
         groww_server.get_provider()
+
+
+def test_live_mode_accepts_direct_access_token(monkeypatch):
+    monkeypatch.setenv("USE_MOCK_GROWW", "false")
+    monkeypatch.setenv("GROWW_ACCESS_TOKEN", "test-token")
+    monkeypatch.delenv("GROWW_API_KEY", raising=False)
+    monkeypatch.delenv("GROWW_API_SECRET", raising=False)
+    monkeypatch.setattr(groww_server, "load_settings", lambda: load_settings(env_file=None))
+    groww_server.get_provider.cache_clear()
+
+    provider = groww_server.get_provider()
+    assert isinstance(provider, groww_server.GrowwProvider)
+    assert provider.source == "groww"
+    assert provider._access_token == "test-token"
 
 
 def test_mock_history_is_consistent_across_windows():

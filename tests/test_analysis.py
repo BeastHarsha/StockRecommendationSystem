@@ -16,8 +16,27 @@ def test_build_holdings_and_totals():
     assert portfolio_totals(rows) == {"invested": 1000.0, "current_value": 1100.0, "pnl": 100.0, "pnl_pct": 10.0}
 
 
-def test_build_holdings_skips_missing_quotes():
-    assert build_holdings([{"symbol": "A", "quantity": 1, "average_price": 1}], {}) == []
+def test_build_holdings_preserves_unpriced_positions_without_inventing_values():
+    rows = build_holdings([{"symbol": "A", "quantity": 2, "average_price": 100}], {})
+    assert rows == [{
+        "symbol": "A", "company_name": "A", "quantity": 2.0, "average_price": 100.0,
+        "last_price": None, "day_change_pct": None, "invested": 200.0,
+        "current_value": None, "pnl": None, "pnl_pct": None,
+    }]
+    assert portfolio_totals(rows) == {
+        "invested": 200.0, "current_value": None, "pnl": None, "pnl_pct": None,
+    }
+
+
+def test_portfolio_totals_require_prices_for_every_holding():
+    rows = build_holdings(
+        [{"symbol": "A", "quantity": 2, "average_price": 100},
+         {"symbol": "B", "quantity": 1, "average_price": 50}],
+        {"A": {"last_price": 110, "day_change_pct": 1}},
+    )
+    assert portfolio_totals(rows) == {
+        "invested": 250.0, "current_value": None, "pnl": None, "pnl_pct": None,
+    }
 
 
 def test_compute_metrics():

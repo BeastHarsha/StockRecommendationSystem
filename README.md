@@ -10,13 +10,13 @@ Built with **LangGraph**, a **custom MCP server** over the official Groww API, *
 
 ## Features
 
-- **Portfolio overview:** holdings, quantities, last prices and unrealised P&L.
+- **Portfolio overview:** holdings and quantities, with last prices and unrealised P&L when live quotes are available.
 - **Price-drop alerts:** a percentage threshold checked against the day's change and the change over the last 5 sessions, both in reports and in a background monitor.
 - **6-month performance:** return, max drawdown and annualised volatility computed in Python, a candlestick chart, and a narrative grounded in those numbers and in retrieved news.
 - **IPO tracker:** current and upcoming NSE IPOs with price band, dates, subscription and an estimated listing range from a transparent heuristic.
 - **Ask:** questions about the portfolio, answered by an LLM that calls the read-only tools itself.
 - **Reasoning trace:** every report shows the agent steps, tool calls and guardrail verdicts behind it.
-- **Works without keys:** mock portfolio data by default, and template summaries when no LLM key is set.
+- **Works without API credits:** mock portfolio data by default, and template summaries when AI summaries are off or the model is unavailable.
 
 ### Read-only by design
 
@@ -39,7 +39,7 @@ flowchart TB
     SCH["APScheduler monitor<br/>price-drop polling<br/>market hours only"]
     AG["LangGraph report agent<br/>typed state graph"]
     QA["Q&A assistant<br/>LLM function calling<br/>max 6 steps"]
-    LLM["Hosted LLM<br/>Anthropic Claude"]
+    LLM["Hosted LLM<br/>OpenAI GPT-6 Luna"]
     OUT{{"Output guardrails<br/>groundedness check<br/>Pydantic schema<br/>prediction label"}}
     G1{{"Tool allowlist<br/>guardrail"}}
     MCP["Custom MCP server, FastMCP<br/>get_portfolio<br/>get_quote<br/>get_historical_candles"]
@@ -168,7 +168,7 @@ sequenceDiagram
 - [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) 1.x (FastMCP). `langchain-mcp-adapters` 0.3.1 doesn't work with `mcp` 2.x, so `mcp` is pinned to 1.30.0.
 - [growwapi](https://pypi.org/project/growwapi/), the official Groww SDK
 - ChromaDB and sentence-transformers (`all-MiniLM-L6-v2`) for embeddings
-- Anthropic Claude through `langchain-anthropic` (optional)
+- OpenAI GPT-6 Luna through `langchain-openai` and the Responses API (optional)
 - Streamlit and Plotly, Pydantic, APScheduler
 
 No GPU is required. Everything runs locally on CPU, and the LLM is called over an API.
@@ -214,8 +214,8 @@ StockRecommendationSystem/
 ### Prerequisites
 
 1. **Python 3.12** and [uv](https://github.com/astral-sh/uv) (or pip).
-2. Optional: an **Anthropic API key** for LLM-written summaries and the Ask tab.
-3. Optional: **Groww API access** (key and secret from the Groww developer portal) to use your real portfolio. Access tokens expire daily, and the MCP server refreshes them.
+2. Optional: an **OpenAI API key** for LLM-written summaries and the Ask tab.
+3. Optional: **Groww API access** to use your real portfolio. Provide either an access token or an API key and secret pair. Direct access tokens expire daily; API key and secret authentication requires daily approval in Groww Cloud. Live quotes and history also require market-data access.
 
 ### Installation
 
@@ -248,10 +248,11 @@ cp .env.example .env
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `GROWW_API_KEY` | | Groww API key. Not needed in mock mode. |
-| `GROWW_API_SECRET` | | Groww API secret. Not needed in mock mode. |
-| `ANTHROPIC_API_KEY` | | LLM key. Without it, summaries use templates and Ask is disabled. |
-| `LLM_MODEL` | `claude-sonnet-5-5` | Model used for summaries and Ask |
+| `GROWW_ACCESS_TOKEN` | | Direct Groww access token. Preferred when you have a generated token; refresh it daily. Not needed in mock mode. |
+| `GROWW_API_KEY` | | Groww API key for the key and secret flow. Not needed when using an access token or mock mode. |
+| `GROWW_API_SECRET` | | Matching Groww API secret. An access token does not belong in this field. |
+| `OPENAI_API_KEY` | | LLM key. Without it, summaries use templates and Ask is disabled. |
+| `LLM_MODEL` | `gpt-6-luna` | Model used for summaries and Ask |
 | `USE_MOCK_GROWW` | `true` | Use sample portfolio data instead of the Groww API |
 | `PRICE_DROP_THRESHOLD_PCT` | `5` | Price-drop alert threshold |
 | `POLL_INTERVAL_MINUTES` | `15` | Monitor polling cadence |
@@ -270,6 +271,7 @@ streamlit run app.py
 Open http://localhost:8501 and click **Generate report** in the sidebar. Options:
 
 - **Ground summaries in news (RAG):** retrieve stored news for each holding. The first run downloads the embedding model (about 90 MB) and takes a minute or two.
+- **Use AI summaries:** turn this off to generate template summaries without OpenAI API calls. If the API reports exhausted credits, the report makes no further model calls and uses templates for the remaining holdings.
 - **Fetch fresh news first:** pull recent headlines from Google News into the vector store before the report.
 - **IPO data:** live from NSE, sample data, or off.
 
@@ -285,7 +287,7 @@ This polls every `POLL_INTERVAL_MINUTES` during NSE market hours (09:15–15:30 
 
 ```bash
 python -m rag.ingest                 # ingest news for every holding without generating a report
-python -m mcp_server.groww_server    # run the MCP server on stdio, e.g. for MCP Inspector or Claude Desktop
+python -m mcp_server.groww_server    # run the MCP server on stdio, e.g. for MCP Inspector
 ```
 
 ### Mock mode
@@ -320,6 +322,7 @@ Prices and metrics are always computed in Python, never by the LLM. That's what 
 
 ## Known limitations
 
+- If Groww allows holdings but denies live market data, the dashboard shows the holdings and invested amount, while current value, P&L and performance remain unavailable.
 - The news corpus is Google News headlines, not full articles or exchange filings.
 - The IPO listing range is a simple subscription-multiple heuristic, not a model. NSE doesn't publish price bands for BSE-listed SME issues, so those get no estimate.
 - The monitor doesn't know about exchange holidays.

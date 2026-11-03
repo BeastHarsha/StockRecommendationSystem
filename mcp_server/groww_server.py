@@ -54,14 +54,20 @@ class MockProvider:
 class GrowwProvider:
     source = "groww"
 
-    def __init__(self, api_key: str, api_secret: str):
+    def __init__(self, api_key: str = "", api_secret: str = "", access_token: str = ""):
         self._api_key = api_key
         self._api_secret = api_secret
+        self._access_token = access_token
         self._client = None
         self._token_date: date | None = None
 
     def _api(self, force_refresh: bool = False):
         from growwapi import GrowwAPI
+
+        if self._access_token:
+            if self._client is None:
+                self._client = GrowwAPI(self._access_token)
+            return self._client
 
         # Groww access tokens expire daily, so fetch a fresh one each day.
         if force_refresh or self._client is None or self._token_date != date.today():
@@ -75,7 +81,11 @@ class GrowwProvider:
 
         try:
             return fn(self._api())
-        except GrowwAPIAuthenticationException:
+        except GrowwAPIAuthenticationException as exc:
+            if self._access_token:
+                raise RuntimeError(
+                    "Groww access token expired or invalid. Replace GROWW_ACCESS_TOKEN in .env with a fresh token."
+                ) from exc
             return fn(self._api(force_refresh=True))
 
     def holdings(self) -> list[dict]:
@@ -144,6 +154,8 @@ def get_provider():
     settings = load_settings()
     if settings.use_mock_groww:
         return MockProvider()
+    if settings.groww_access_token:
+        return GrowwProvider(access_token=settings.groww_access_token)
     missing = [n for n in settings.missing_credentials() if n.startswith("GROWW")]
     if missing:
         raise RuntimeError(f"USE_MOCK_GROWW=false but these are missing: {', '.join(missing)}")

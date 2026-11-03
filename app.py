@@ -15,6 +15,12 @@ RUPEE = "₹%.2f"
 PERCENT = "%.2f%%"
 
 
+def report_error_message(exc: BaseException) -> str:
+    if isinstance(exc, BaseExceptionGroup):
+        return "; ".join(dict.fromkeys(report_error_message(error) for error in exc.exceptions))
+    return str(exc)
+
+
 @st.cache_resource(show_spinner=False)
 def get_rag(persist_dir: str, model_name: str):
     from rag.ingest import SentenceTransformerEmbedder, ingest_news, open_collection
@@ -32,7 +38,8 @@ def get_llm(settings: Settings):
     return make_llm(settings)
 
 
-def generate_report(settings: Settings, use_rag: bool, refresh_news: bool, ipo_choice: str):
+def generate_report(settings: Settings, use_rag: bool, refresh_news: bool, ipo_choice: str,
+                    use_llm: bool = True):
     from agent.graph import run_report
     from data.ipo_fetcher import MockIpoSource, NseIpoSource
 
@@ -40,7 +47,7 @@ def generate_report(settings: Settings, use_rag: bool, refresh_news: bool, ipo_c
     ipo_source = {"NSE (live)": NseIpoSource(), "Sample data": MockIpoSource()}.get(ipo_choice)
     return asyncio.run(run_report(
         settings,
-        llm=get_llm(settings),
+        llm=get_llm(settings) if use_llm else None,
         retriever=retriever,
         ingest=ingest,
         ipo_source=ipo_source,
@@ -52,13 +59,16 @@ def sidebar(settings: Settings) -> None:
     with st.sidebar:
         st.header("Setup")
         st.markdown(f"**Data source:** {'Mock data' if settings.use_mock_groww else 'Groww API (read-only)'}")
-        st.markdown(f"**LLM:** `{settings.llm_model}`" if settings.anthropic_api_key else "**LLM:** not configured, using templates")
+        st.markdown(f"**LLM:** `{settings.llm_model}`" if settings.openai_api_key else "**LLM:** not configured, using templates")
         st.markdown(f"**Price-drop threshold:** {settings.price_drop_threshold_pct:g}%")
         missing = settings.missing_credentials()
         if missing:
             st.warning("Missing in .env: " + ", ".join(missing))
 
         st.header("Report options")
+        use_llm = st.checkbox("Use AI summaries", value=bool(settings.openai_api_key),
+                              disabled=not bool(settings.openai_api_key),
+                              help="Requires OpenAI API credits. Turn off to use free template summaries.")
         use_rag = st.checkbox("Ground summaries in news (RAG)", value=True,
                               help="The first run downloads the embedding model and can take a minute.")
         refresh_news = st.checkbox("Fetch fresh news first", value=False, disabled=not use_rag,
@@ -68,18 +78,23 @@ def sidebar(settings: Settings) -> None:
         if st.button("Generate report", type="primary", width="stretch"):
             with st.spinner("Running the agent..."):
                 try:
-                    st.session_state["report"] = generate_report(settings, use_rag, refresh_news and use_rag, ipo_choice)
+                    st.session_state["report"] = generate_report(
+                        settings, use_rag, refresh_news and use_rag, ipo_choice, use_llm=use_llm
+                    )
                     st.session_state.pop("report_error", None)
                 except Exception as exc:
-                    st.session_state["report_error"] = str(exc)
+                    st.session_state["report_error"] = report_error_message(exc)
 
 
 def portfolio_tab(report) -> None:
     totals = report.totals
     c1, c2, c3 = st.columns(3)
     c1.metric("Invested", f"₹{totals.invested:,.2f}")
-    c2.metric("Current value", f"₹{totals.current_value:,.2f}")
-    c3.metric("Unrealised P&L", f"₹{totals.pnl:,.2f}", f"{totals.pnl_pct:.2f}%")
+    c2.metric("Current value", f"₹{totals.current_value:,.2f}" if totals.current_value is not None else "Unavailable")
+    c3.metric("Unrealised P&L", f"₹{totals.pnl:,.2f}" if totals.pnl is not None else "Unavailable",
+              f"{totals.pnl_pct:.2f}%" if totals.pnl_pct is not None else None)
+    if totals.current_value is None:
+        st.info("Live prices are unavailable for one or more holdings, so current value and P&L cannot be calculated.")
 
     df = pd.DataFrame([h.model_dump() for h in report.holdings])
     st.dataframe(
@@ -100,9 +115,12 @@ def portfolio_tab(report) -> None:
         },
     )
     if report.errors:
-        with st.expander(f"{len(report.errors)} issues during this run"):
-            for error in report.errors:
-                st.write(f"- {error}")
+        if len(report.errors) == 1:
+            st.warning(report.errors[0])
+        else:
+            with st.expander(f"{len(report.errors)} issues during this run"):
+                for error in report.errors:
+                    st.write(f"- {error}")
 
 
 def alerts_tab(report) -> None:
@@ -192,7 +210,7 @@ def ipo_tab(report) -> None:
 def ask_tab(settings: Settings) -> None:
     llm = get_llm(settings)
     if llm is None:
-        st.info("Add ANTHROPIC_API_KEY to .env to ask questions. The assistant uses the same read-only tools.")
+        st.info("Add OPENAI_API_KEY to .env to ask questions. The assistant uses the same read-only tools.")
         return
     st.caption("The assistant can only call get_portfolio, get_quote and get_historical_candles.")
     question = st.text_input("Ask about your portfolio", placeholder="Which holding fell the most today?")
@@ -203,7 +221,9 @@ def ask_tab(settings: Settings) -> None:
             try:
                 st.session_state["answer"] = asyncio.run(ask(question, llm))
             except Exception as exc:
-                st.error(f"The assistant failed: {exc}")
+                from agent.graph import billing_error_message
+
+                st.error(billing_error_message(exc) or f"The assistant failed: {exc}")
 
     result = st.session_state.get("answer")
     if result:

@@ -136,7 +136,7 @@ PYTHON PACKAGES
                             because langchain-mcp-adapters 0.3.1 breaks on 2.x
   langgraph                 Agent orchestration
   langchain-core            Core LangChain abstractions
-  langchain-anthropic       Claude LLM integration
+  langchain-openai          OpenAI GPT-6 Luna LLM integration
   langchain-mcp-adapters    Load MCP tools into LangGraph
   chromadb                  Local vector store
   sentence-transformers     Local CPU embeddings (all-MiniLM-L6-v2)
@@ -154,18 +154,19 @@ PYTHON PACKAGES
   tzdata                    IST time zone data (needed on Windows)
 
 EXTERNAL SERVICES
-  - Groww API key and secret (Groww developer portal), optional in mock mode
-  - Anthropic API key, optional (templates and no Ask tab without it)
+  - Groww access token or API key and secret (Groww developer portal), optional in mock mode
+  - OpenAI API key, optional (templates and no Ask tab without it)
 
 ENVIRONMENT VARIABLES
+  GROWW_ACCESS_TOKEN          Direct Groww access token (expires daily)
   GROWW_API_KEY              Groww API key
   GROWW_API_SECRET           Groww API secret
-  ANTHROPIC_API_KEY          LLM API key
+  OPENAI_API_KEY            LLM API key
   USE_MOCK_GROWW             true/false, use sample data
   PRICE_DROP_THRESHOLD_PCT   Default alert threshold, e.g. 5
   POLL_INTERVAL_MINUTES      Polling cadence, e.g. 15
   MAX_SELF_CHECK_RETRIES     Self-check loop cap, e.g. 3
-  LLM_MODEL                  Model used by the agent, default claude-sonnet-5-5
+  LLM_MODEL                  Model used by the agent, default gpt-6-luna
   CHROMA_PERSIST_DIR         Vector store location, default storage/chroma
   EMBEDDING_MODEL            Embedding model, default all-MiniLM-L6-v2
 
@@ -238,7 +239,7 @@ flowchart TB
     SCH["APScheduler monitor<br/>price-drop polling<br/>market hours only"]
     AG["LangGraph report agent<br/>typed state graph"]
     QA["Q&A assistant<br/>LLM function calling<br/>max 6 steps"]
-    LLM["Hosted LLM<br/>Anthropic Claude"]
+    LLM["Hosted LLM<br/>OpenAI GPT-6 Luna"]
     OUT{{"Output guardrails<br/>groundedness check<br/>Pydantic schema<br/>prediction label"}}
     G1{{"Tool allowlist<br/>guardrail"}}
     MCP["Custom MCP server, FastMCP<br/>get_portfolio<br/>get_quote<br/>get_historical_candles"]

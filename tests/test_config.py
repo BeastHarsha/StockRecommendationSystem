@@ -5,7 +5,8 @@ from config import ROOT_DIR, load_settings
 ENV_VARS = [
     "GROWW_API_KEY",
     "GROWW_API_SECRET",
-    "ANTHROPIC_API_KEY",
+    "GROWW_ACCESS_TOKEN",
+    "OPENAI_API_KEY",
     "LLM_MODEL",
     "USE_MOCK_GROWW",
     "PRICE_DROP_THRESHOLD_PCT",
@@ -29,18 +30,29 @@ def test_defaults():
     assert settings.poll_interval_minutes == 15
     assert settings.max_self_check_retries == 3
     assert settings.chroma_persist_dir == ROOT_DIR / "storage" / "chroma"
+    assert settings.llm_model == "gpt-6-luna"
 
 
 def test_mock_mode_does_not_require_groww_credentials():
     settings = load_settings(env_file=None)
-    assert settings.missing_credentials() == ["ANTHROPIC_API_KEY"]
+    assert settings.missing_credentials() == ["OPENAI_API_KEY"]
 
 
 def test_real_mode_requires_groww_credentials(monkeypatch):
     monkeypatch.setenv("USE_MOCK_GROWW", "false")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     settings = load_settings(env_file=None)
     assert settings.missing_credentials() == ["GROWW_API_KEY", "GROWW_API_SECRET"]
+
+
+def test_direct_access_token_replaces_key_and_secret(monkeypatch):
+    monkeypatch.setenv("USE_MOCK_GROWW", "false")
+    monkeypatch.setenv("GROWW_ACCESS_TOKEN", "test-token")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    settings = load_settings(env_file=None)
+    assert settings.groww_access_token == "test-token"
+    assert settings.missing_credentials() == []
 
 
 def test_env_values_override_defaults(monkeypatch):

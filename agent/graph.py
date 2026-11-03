@@ -36,6 +36,7 @@ Rules:
 
 class ReportState(TypedDict, total=False):
     refresh_news: bool
+    llm_unavailable: bool
     data_source: str
     holdings_raw: list[dict]
     quotes: dict[str, dict]
@@ -79,7 +80,28 @@ def message_text(message) -> str:
     content = message.content
     if isinstance(content, str):
         return content.strip()
-    return "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text").strip()
+    return "".join(
+        b.get("text", "")
+        for b in content
+        if isinstance(b, dict) and b.get("type") in {"text", "output_text"}
+    ).strip()
+
+
+def billing_error_message(exc: Exception) -> str | None:
+    """Return a short action for non-retryable OpenAI billing and quota errors."""
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        body = body.get("error", body)
+    code = getattr(exc, "code", None) or (body.get("code") if isinstance(body, dict) else None)
+    message = str(exc).lower()
+
+    if code == "credit_balance_exhausted" or "no credits remaining" in message:
+        return "OpenAI API credits are exhausted. Add credits in your OpenAI API billing settings."
+    if code in {"organization_spend_limit_exceeded", "project_spend_limit_exceeded"}:
+        return "OpenAI API spending limit reached. Check your organization or project spend limit."
+    if code == "organization_usage_limit_exceeded":
+        return "OpenAI API usage limit reached. Check your organization's usage limit."
+    return None
 
 
 def _facts(symbol: str, state: ReportState) -> dict:
@@ -136,6 +158,11 @@ def build_report_graph(deps: ReportDeps):
                 quotes[h["symbol"]] = await toolbox.call("get_quote", {"symbol": h["symbol"]})
             except ToolCallError as exc:
                 errors.append(f"Quote for {h['symbol']} failed: {exc}")
+        if holdings and len(errors) == len(holdings) and all("Access forbidden for this request" in error for error in errors):
+            errors = [
+                "Groww returned holdings but denied all live quote requests. Current value and P&L are unavailable. "
+                "Check your Groww market-data access."
+            ]
         rows = analysis.build_holdings(holdings, quotes)
         rejected = toolbox.rejected_at_load
         return {
@@ -219,12 +246,13 @@ def build_report_graph(deps: ReportDeps):
         summaries = dict(state.get("summaries", {}))
         targets = state.get("pending") or list(state.get("metrics", {}))
         errors = []
+        llm_unavailable = state.get("llm_unavailable", False)
         for symbol in targets:
             facts = _facts(symbol, state)
             sources = state.get("news", {}).get(symbol, [])
             previous = summaries.get(symbol, {})
             narrative, origin = None, "template"
-            if deps.llm is not None:
+            if deps.llm is not None and not llm_unavailable:
                 prompt = f"FACTS:\n{json.dumps(facts, indent=2)}\n\nSOURCES:\n{_format_sources(sources)}"
                 if previous.get("ungrounded_numbers"):
                     prompt += ("\n\nYour previous draft used numbers that are not in FACTS or SOURCES: "
@@ -233,7 +261,11 @@ def build_report_graph(deps: ReportDeps):
                     reply = await deps.llm.ainvoke([SystemMessage(SUMMARY_SYSTEM_PROMPT), HumanMessage(prompt)])
                     narrative, origin = message_text(reply), "llm"
                 except Exception as exc:
-                    errors.append(f"LLM summary for {symbol} failed, used template instead: {exc}")
+                    if reason := billing_error_message(exc):
+                        llm_unavailable = True
+                        errors.append(f"{reason} Using template summaries for the rest of this report.")
+                    else:
+                        errors.append(f"LLM summary for {symbol} failed, used template instead: {exc}")
             if not narrative:
                 narrative, origin = template_narrative(facts), "template"
             summaries[symbol] = {
@@ -248,8 +280,10 @@ def build_report_graph(deps: ReportDeps):
         return {
             "summaries": summaries,
             "errors": errors,
+            "llm_unavailable": llm_unavailable,
             "trace": [_event("summarize_performance", f"Drafted {len(targets)} summaries",
-                             symbols=targets, attempt=state.get("retry_count", 0) + 1)],
+                             symbols=targets, attempt=state.get("retry_count", 0) + 1,
+                             llm_unavailable=llm_unavailable)],
         }
 
     async def self_check(state: ReportState) -> dict:
@@ -363,17 +397,18 @@ def build_report_graph(deps: ReportDeps):
 
 
 def make_llm(settings):
-    if not settings.anthropic_api_key:
+    if not settings.openai_api_key:
         return None
-    from langchain_anthropic import ChatAnthropic
+    from langchain_openai import ChatOpenAI
 
-    return ChatAnthropic(
+    return ChatOpenAI(
         model=settings.llm_model,
-        api_key=settings.anthropic_api_key,
-        temperature=0,
+        api_key=settings.openai_api_key,
+        use_responses_api=True,
+        reasoning_effort="none",
         max_tokens=600,
         timeout=60,
-        max_retries=2,
+        max_retries=0,
     )
 
 
