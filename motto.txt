@@ -132,10 +132,11 @@ RUNTIME
 
 PYTHON PACKAGES
   growwapi                  Official Groww SDK
-  mcp                       MCP Python SDK (FastMCP server)
+  mcp                       MCP Python SDK (FastMCP server), pinned to 1.30.0
+                            because langchain-mcp-adapters 0.3.1 breaks on 2.x
   langgraph                 Agent orchestration
   langchain-core            Core LangChain abstractions
-  langchain-anthropic       Claude LLM integration (or langchain-openai)
+  langchain-anthropic       Claude LLM integration
   langchain-mcp-adapters    Load MCP tools into LangGraph
   chromadb                  Local vector store
   sentence-transformers     Local CPU embeddings (all-MiniLM-L6-v2)
@@ -150,10 +151,11 @@ PYTHON PACKAGES
   streamlit                 Dashboard
   plotly                    Charts
   pytest                    Tests
+  tzdata                    IST time zone data (needed on Windows)
 
 EXTERNAL SERVICES
-  - Groww API key and secret (Groww developer portal)
-  - LLM API key (Anthropic or OpenAI)
+  - Groww API key and secret (Groww developer portal), optional in mock mode
+  - Anthropic API key, optional (templates and no Ask tab without it)
 
 ENVIRONMENT VARIABLES
   GROWW_API_KEY              Groww API key
@@ -175,12 +177,14 @@ ENVIRONMENT VARIABLES
   Source                          Provides                         Access
   ------------------------------  -------------------------------  ----------
   Groww official API (growwapi)   Holdings, quotes, OHLC candles   Read-only
-  News RSS (e.g. Google News)     Company news for RAG             Read-only
-  NSE/BSE disclosures             Filings and announcements        Read-only
-  Public IPO listing pages        IPO calendar and subscription    Read-only
+  Google News RSS                 Company headlines for RAG        Read-only
+  NSE IPO API                     Current/upcoming IPOs, price     Read-only
+  (ipo-current-issue,             band, subscription multiple
+   all-upcoming-issues)
 
-Open items: confirm Groww API access terms, and pick final IPO and
-news/filings sources.
+Groww response formats follow the official docs at
+groww.in/trade-api/docs/python-sdk. Daily candles are limited to 180 days per
+request. NSE needs the cookies set by its home page before its API answers.
 
 
 ================================================================================
@@ -189,81 +193,86 @@ news/filings sources.
 
 7.1 HIGH-LEVEL VIEW
 
-    +--------------------+        +--------------------+
-    | Streamlit dashboard|        | Scheduler          |
-    | (app.py)           |        | (price-drop poll)  |
-    +---------+----------+        +---------+----------+
-              |                             |
-              +-------------+---------------+
-                            |
-                            v
-                +-----------------------+
-                |   LangGraph agent     |
-                |   (agent/graph.py)    |
-                +-----------+-----------+
-                            |
-                            v
-                +-----------------------+
-                |      Guardrails       |
-                | (agent/guardrails.py) |
-                +---+-------+-------+---+
-                    |       |       |
-          +---------+       |       +-----------+
-          v                 v                   v
- +-----------------+ +--------------+ +-------------------+
- | Custom MCP      | | RAG retriever| | IPO fetcher       |
- | server          | | (rag/)       | | (data/)           |
- | (read-only)     | +------+-------+ +---------+---------+
- +--------+--------+        |                   |
-          |                 v                   v
-          v          +--------------+   +------------------+
- +-----------------+ | Chroma       |   | Public IPO pages |
- | Groww API       | | vector store |   +------------------+
- | (growwapi SDK)  | +------+-------+
- +-----------------+        ^
-                            |
-                   +--------+--------+
-                   | rag/ingest.py   |
-                   | news + filings  |
-                   +-----------------+
+    +------------------------------+          +----------------------+
+    | Streamlit dashboard (app.py) |<---------| storage/alerts.json  |
+    +------+---------------+-------+          +----------^-----------+
+           |               |                             |
+    generate report       ask                 +----------+-----------+
+           |               |                  | scheduler/monitor.py |
+           v               v                  | APScheduler polling  |
+  +----------------+  +-------------------+   +----------+-----------+
+  | LangGraph      |  | Q&A assistant     |              |
+  | report agent   |  | (function calling)|              |
+  | agent/graph.py |  | agent/assistant.py|              |
+  +---+-----+---+--+  +---------+---------+              |
+      |     |   |               |                        |
+      |     |   +---------------+------------------------+
+      |     |                   |
+      |     |                   v
+      |     |        +-----------------------+
+      |     |        | Tool allowlist        |
+      |     |        | (agent/guardrails.py) |
+      |     |        +-----------+-----------+
+      |     |                    |  stdio (agent/mcp_client.py)
+      |     |                    v
+      |     |        +-----------------------+     +-----------------+
+      |     |        | Custom MCP server     |---->| Groww API       |
+      |     |        | (read-only, FastMCP)  |     | (growwapi SDK)  |
+      |     |        +-----------------------+     +-----------------+
+      |     v
+      |   +---------------+     +-----------------+     +-----------------+
+      |   | RAG retriever |---->| Chroma store    |<----| rag/ingest.py   |
+      |   | (rag/)        |     | storage/chroma  |     | Google News RSS |
+      |   +---------------+     +-----------------+     +-----------------+
+      v
+  +-----------------------+     +-----------------+
+  | IPO fetcher (data/)   |---->| NSE IPO API     |
+  +-----------------------+     +-----------------+
 
 
 7.1a MERMAID DIAGRAM (paste into https://mermaid.live or view in README.md)
 
 flowchart TB
     User(["User"])
-    UI["Streamlit dashboard<br/>holdings, alerts, charts,<br/>IPOs, reasoning trace"]
-    SCH["APScheduler<br/>price-drop polling<br/>market hours only"]
-    AG["LangGraph agent<br/>typed state graph"]
-    LLM["Hosted LLM<br/>Claude or OpenAI"]
-    OUT{{"Output guardrails<br/>groundedness check<br/>Pydantic schema<br/>prediction disclaimer"}}
+    UI["Streamlit dashboard<br/>holdings, alerts, charts,<br/>IPOs, Ask, reasoning trace"]
+    SCH["APScheduler monitor<br/>price-drop polling<br/>market hours only"]
+    AG["LangGraph report agent<br/>typed state graph"]
+    QA["Q&A assistant<br/>LLM function calling<br/>max 6 steps"]
+    LLM["Hosted LLM<br/>Anthropic Claude"]
+    OUT{{"Output guardrails<br/>groundedness check<br/>Pydantic schema<br/>prediction label"}}
     G1{{"Tool allowlist<br/>guardrail"}}
     MCP["Custom MCP server, FastMCP<br/>get_portfolio<br/>get_quote<br/>get_historical_candles"]
     BLOCKED["place / modify / cancel order<br/>NOT IMPLEMENTED"]
-    RET["RAG retriever<br/>last 6 months, top-k"]
+    RET["RAG retriever<br/>symbol + last 6 months, top-k"]
     VDB[("Chroma vector store<br/>symbol, source_url, date")]
     ING["Ingest pipeline<br/>sanitize, chunk,<br/>embed with MiniLM on CPU"]
-    IPOF["IPO fetcher"]
+    IPOF["IPO fetcher<br/>+ listing heuristic"]
     GROWW[("Groww official API<br/>growwapi SDK")]
-    NEWS[("News RSS<br/>NSE / BSE disclosures")]
-    IPOS[("Public IPO pages")]
+    NEWS[("Google News RSS")]
+    IPOS[("NSE IPO API")]
+    ALERTS[("storage/alerts.json")]
 
     User --> UI
     UI -->|"generate report"| AG
-    SCH -->|"scheduled run"| AG
-    AG <-->|"reasoning"| LLM
+    UI -->|"ask"| QA
+    AG <-->|"summaries"| LLM
+    QA <-->|"tool calls"| LLM
     AG -->|"tool calls"| G1
-    AG -->|"query"| RET
-    AG --> IPOF
+    QA -->|"tool calls"| G1
+    SCH -->|"polls"| G1
     G1 -->|"allowed"| MCP
     G1 -.->|"rejected"| BLOCKED
     MCP --> GROWW
+    AG -->|"query"| RET
     RET --> VDB
     NEWS --> ING
     ING --> VDB
+    AG --> IPOF
     IPOF --> IPOS
     AG -->|"draft report"| OUT
     OUT -.->|"validated report + trace"| UI
+    SCH --> ALERTS
+    ALERTS -.-> UI
 
     classDef present fill:#e3f2fd,stroke:#1e88e5,color:#0d47a1
     classDef orch fill:#ede7f6,stroke:#5e35b1,color:#311b92
@@ -272,10 +281,10 @@ flowchart TB
     classDef ext fill:#eceff1,stroke:#546e7a,color:#263238
     classDef blocked fill:#fde2e2,stroke:#c0392b,color:#c0392b,stroke-dasharray: 5 5
     class User,UI,SCH present
-    class AG,LLM orch
+    class AG,QA,LLM orch
     class G1,OUT guard
     class MCP,RET,VDB,ING,IPOF tool
-    class GROWW,NEWS,IPOS ext
+    class GROWW,NEWS,IPOS,ALERTS ext
     class BLOCKED blocked
 
 
@@ -283,13 +292,15 @@ flowchart TB
 
   Layer           Component            Responsibility
   --------------  -------------------  ----------------------------------------
-  Presentation    Streamlit            Holdings, alerts, charts, IPOs, trace
+  Presentation    Streamlit            Holdings, alerts, charts, IPOs, Ask,
+                                       trace
   Orchestration   LangGraph agent      Runs the graph, manages state, retries
+                  Q&A assistant        LLM picks tools, capped tool loop
   Safety          Guardrails           Allowlist, sanitization, groundedness,
                                        schema validation, disclaimers
   Data access     Custom MCP server    Read-only wrapper over growwapi
-  Knowledge       RAG (Chroma)         Grounded news and filings retrieval
-  External data   IPO fetcher          IPO calendar and subscription data
+  Knowledge       RAG (Chroma)         Grounded news retrieval
+  External data   IPO fetcher          NSE IPO calendar and subscription data
   Control flow    Scheduler            Periodic price-drop monitoring
 
 
@@ -298,33 +309,32 @@ flowchart TB
   START
     |
     v
-  fetch_portfolio ........... MCP: get_portfolio, get_quote
+  fetch_portfolio ........... MCP: get_portfolio, get_quote per holding
     |
     v
-  detect_price_drops ........ compare against thresholds
+  fetch_history ............. MCP: get_historical_candles (180 days)
+    |                         return, drawdown, volatility in Python
+    v
+  detect_price_drops ........ day change and 5-session change vs threshold
     |
     v
-  retrieve_news ............. RAG query per holding
+  retrieve_news ............. optional fresh ingest, then RAG per holding
     |
     v
-  summarize_performance ..... MCP: get_historical_candles
-    |                         metrics in Python, narrative by LLM
+  summarize_performance <---+ LLM narrative, or a template with no key
+    |                       | (retry: only failing summaries, told which
+    v                       |  numbers were ungrounded)
+  self_check ---------------+ groundedness; fail and retries < MAX
+    |
+    +-- pass, or retries = MAX (flag as partially unverified)
     v
-  fetch_ipo_calendar ........ IPO fetcher
+  fetch_ipo_calendar ........ NSE IPO API (or sample data)
     |
     v
-  estimate_listing_range .... heuristic range + assumptions
+  estimate_listing_range .... heuristic range + assumptions + label
     |
     v
-  self_check ................ groundedness + schema validation
-    |
-    +-- fail and retries < MAX --> back to retrieve_news / regenerate
-    |
-    +-- fail and retries = MAX --> flag report as partially unverified
-    |
-    +-- pass
-    v
-  compile_report
+  compile_report ............ Pydantic schema validation + disclaimer
     |
     v
   END
@@ -332,30 +342,41 @@ flowchart TB
 
 7.4 AGENT STATE
 
-  portfolio          list of holdings with quotes
-  price_alerts       list of triggered alerts
-  candles            6-month OHLC per holding
-  metrics            computed return, drawdown, volatility per holding
-  retrieved_docs     RAG chunks with source URL and date
-  summaries          per-holding narratives with citations
-  ipos               IPO records
-  ipo_estimates      low/high range, assumptions, disclaimer
-  guardrail_results  verdicts per check
-  retry_count        self-check iterations used
-  trace              ordered log of nodes, tool calls and outputs
-  report             final structured report
+  ReportState (TypedDict in agent/graph.py)
+  refresh_news       fetch fresh news before retrieval
+  data_source        "mock" or "groww"
+  holdings_raw       holdings as returned by get_portfolio
+  quotes             quote per symbol
+  holdings           holdings with P&L computed
+  totals             invested, current value, P&L
+  history            6-month OHLC per holding
+  metrics            return, drawdown, volatility per holding
+  alerts             triggered price-drop alerts
+  news               retrieved chunks per holding with source URL and date
+  summaries          per-holding narrative, citations, verified flag, attempts
+  pending            symbols whose summaries must be rewritten
+  retry_count        self-check retries used
+  ipos               IPO records with estimates
+  report             final validated report
+  trace              ordered log of nodes and tool calls (append-only)
+  guardrails         guardrail verdicts (append-only)
+  errors             non-fatal problems (append-only)
 
 
 7.5 MCP SERVER TOOLS
 
   Tool                    Input                      Output
   ----------------------  -------------------------  -------------------------
-  get_portfolio           none                       holdings with qty, avg
-                                                     price, current price, P&L
-  get_quote               symbol                     LTP, day change, volume
-  get_historical_candles  symbol, interval, from, to OHLCV list
+  get_portfolio           none                       source, holdings: symbol,
+                                                     company, ISIN, qty, avg price
+  get_quote               symbol                     last price, previous close,
+                                                     day change (abs, %), OHLC,
+                                                     volume, 52-week range
+  get_historical_candles  symbol, days (5-180)       daily OHLCV candles
 
-  Not implemented, by design: place_order, modify_order, cancel_order.
+  All three carry readOnlyHint=true. Symbols are validated against
+  ^[A-Z0-9&-]{1,20}$. Not implemented, by design: place_order, modify_order,
+  cancel_order.
 
 
 7.6 GUARDRAILS
@@ -378,23 +399,32 @@ flowchart TB
 7.7 LOOPS
 
   Self-check loop
-    Runs after report drafting. If grounding or schema checks fail, the agent
-    re-retrieves or regenerates. Capped at MAX_SELF_CHECK_RETRIES, after which
-    the report is flagged instead of looping forever.
+    Runs after the summaries are drafted. Failing summaries are rewritten with
+    the ungrounded numbers named in the prompt. Capped at
+    MAX_SELF_CHECK_RETRIES, after which they are flagged as partially
+    unverified instead of looping forever.
+
+  Assistant tool loop
+    The Q&A assistant lets the LLM call tools until it answers, capped at 6
+    steps. Disallowed tool names are blocked and reported back to the LLM.
 
   Monitoring loop
     APScheduler job every POLL_INTERVAL_MINUTES during market hours
-    (09:15-15:30 IST, trading days). Fetches quotes, checks thresholds, and
-    pushes alerts to the dashboard.
+    (09:15-15:30 IST, Monday to Friday). Fetches quotes and 14 days of
+    candles, checks thresholds, and appends new alerts to storage/alerts.json
+    (one per symbol, window and day), which the dashboard reads.
 
 
 7.8 RAG PIPELINE
 
-  Ingest:   fetch news/filings per holding -> clean -> sanitize -> chunk
-            (~500 tokens, 50 overlap) -> embed (all-MiniLM-L6-v2) -> store in
-            Chroma with metadata {symbol, source_url, published_date}
-  Retrieve: query by symbol + topic -> filter last 6 months -> top-k chunks
-  Use:      chunks passed to the summarizer with citation requirements
+  Ingest:   Google News RSS per holding (up to 25 items, last 180 days)
+            -> strip HTML -> sanitize -> chunk (2000 chars, 200 overlap)
+            -> embed (all-MiniLM-L6-v2, normalized) -> upsert into Chroma with
+            metadata {symbol, title, source, source_url, published_ts,
+            published_date}; ids are hashes of symbol + URL + chunk index
+  Retrieve: query embedding + filter symbol and last 6 months -> top 5
+  Use:      chunks passed to the summarizer, which must cite them as [n];
+            their numbers are allowed by the groundedness check
 
 
 7.9 KEY DESIGN DECISIONS
@@ -414,21 +444,27 @@ flowchart TB
 
   StockRecommendationSystem/
   |-- mcp_server/
-  |   `-- groww_server.py       read-only MCP tools over growwapi
+  |   |-- groww_server.py       read-only MCP tools over growwapi
+  |   `-- mock_data.py          deterministic sample portfolio
   |-- agent/
-  |   |-- graph.py              LangGraph state and nodes
-  |   `-- guardrails.py         allowlist, groundedness, disclaimers
+  |   |-- graph.py              LangGraph report agent
+  |   |-- assistant.py          Q&A with function calling
+  |   |-- guardrails.py         allowlist, sanitization, groundedness
+  |   |-- analysis.py           P&L, metrics, price-drop detection
+  |   |-- schemas.py            Pydantic report schema
+  |   `-- mcp_client.py         stdio connection to the MCP server
   |-- rag/
-  |   |-- ingest.py             fetch, chunk and embed news/filings
-  |   `-- retriever.py
+  |   |-- ingest.py             fetch, sanitize, chunk and embed news
+  |   `-- retriever.py          symbol- and date-filtered retrieval
   |-- data/
-  |   `-- ipo_fetcher.py        IPO calendar source
+  |   `-- ipo_fetcher.py        NSE IPO calendar and listing heuristic
   |-- scheduler/
-  |   `-- monitor.py            price-drop polling loop
-  |-- tests/
-  |-- app.py                    Streamlit entry point
-  |-- config.py
-  |-- requirements.txt
+  |   `-- monitor.py            price-drop polling loop and alert store
+  |-- tests/                    unit, integration and environment tests
+  |-- app.py                    Streamlit dashboard
+  |-- config.py                 settings from .env, validated
+  |-- requirements.txt          pinned versions
+  |-- pytest.ini
   |-- .env.example
   |-- README.md
   `-- motto.txt
@@ -463,12 +499,14 @@ flowchart TB
 10. SUCCESS CRITERIA
 ================================================================================
 
-  [ ] No code path can place, modify or cancel an order
-  [ ] Every numeric claim traces to a tool call or computed metric
-  [ ] Every prediction shows a range, assumptions and a disclaimer
-  [ ] Self-check loop never exceeds its retry cap
-  [ ] Dashboard works end to end against a real Groww account (or mock mode)
-  [ ] Tests cover the allowlist, groundedness check and MCP tools
+  [x] No code path can place, modify or cancel an order
+  [x] Every numeric claim traces to a tool call, computed metric or source
+  [x] Every prediction shows a range, assumptions and a disclaimer
+  [x] Self-check loop never exceeds its retry cap
+  [x] Dashboard works end to end in mock mode
+  [ ] Dashboard works end to end against a real Groww account (needs keys)
+  [ ] LLM-written summaries and the Ask tab checked with a real API key
+  [x] Tests cover the allowlist, groundedness check and MCP tools
 
 
 ================================================================================
@@ -484,5 +522,28 @@ flowchart TB
   Prompt injection via news content    Content sanitization before retrieval
   Users treat estimates as advice      Mandatory labels, ranges, assumptions
   Third-party code touching account    Only the official SDK, self-built MCP
+
+
+================================================================================
+12. IMPLEMENTATION STATUS (differences from the requirements above)
+================================================================================
+
+  FR-2   Thresholds are percentage-only and portfolio-wide (one
+         PRICE_DROP_THRESHOLD_PCT). Absolute and per-holding thresholds are
+         not implemented. "Weekly" means the last 5 sessions.
+  FR-3   The RAG corpus is Google News headlines, not full articles or
+         exchange filings. Without an LLM key, summaries come from a
+         template and cite nothing; retrieved headlines are still listed.
+  FR-4   Lot size is not shown (NSE's API doesn't return it). The heuristic
+         uses only the subscription multiple, not sector or market
+         conditions. NSE gives no price band for BSE-listed SME issues, so
+         those get no estimate.
+  FR-5   Reports are on demand. The schedule runs the price-drop monitor,
+         not full reports.
+  NFR-3  Traces are shown in the dashboard but not saved to disk.
+  NFR-4  Groww rate limits are respected by calling tools sequentially; there
+         is no cache between polls.
+  Added  Q&A assistant (Ask tab) using LLM function calling over the same
+         guarded tools, with groundedness checks on its answers.
 
 ================================================================================

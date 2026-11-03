@@ -2,9 +2,7 @@
 
 An AI agent that monitors a Groww brokerage portfolio and produces grounded, explainable reports: price-drop alerts, 6-month company performance summaries, and IPO updates with clearly labeled listing-price estimates.
 
-Built with **LangGraph**, a **custom MCP server** over the official Groww API, **RAG**, **guardrails**, and a **Streamlit** dashboard.
-
-> **Status:** Work in progress. See the [Roadmap](#roadmap).
+Built with **LangGraph**, a **custom MCP server** over the official Groww API, **RAG**, **guardrails**, **LLM function calling** and a **Streamlit** dashboard.
 
 > **Disclaimer:** This project is for educational and informational purposes only. Nothing it produces is financial advice. All predictions are illustrative estimates with stated assumptions, not guarantees.
 
@@ -12,15 +10,21 @@ Built with **LangGraph**, a **custom MCP server** over the official Groww API, *
 
 ## Features
 
-- **Portfolio overview:** live holdings, quantities, current prices and unrealized P&L.
-- **Price-drop alerts:** configurable percentage or absolute thresholds per holding or across the portfolio.
-- **6-month performance:** returns, max drawdown and volatility computed in Python, with a narrative grounded in retrieved news and filings.
-- **IPO tracker:** upcoming and recent IPOs with price band, dates, subscription status and an estimated listing-price range.
-- **Reasoning trace:** every report shows the tool calls, retrieved sources and guardrail decisions behind it.
+- **Portfolio overview:** holdings, quantities, last prices and unrealised P&L.
+- **Price-drop alerts:** a percentage threshold checked against the day's change and the change over the last 5 sessions, both in reports and in a background monitor.
+- **6-month performance:** return, max drawdown and annualised volatility computed in Python, a candlestick chart, and a narrative grounded in those numbers and in retrieved news.
+- **IPO tracker:** current and upcoming NSE IPOs with price band, dates, subscription and an estimated listing range from a transparent heuristic.
+- **Ask:** questions about the portfolio, answered by an LLM that calls the read-only tools itself.
+- **Reasoning trace:** every report shows the agent steps, tool calls and guardrail verdicts behind it.
+- **Works without keys:** mock portfolio data by default, and template summaries when no LLM key is set.
 
 ### Read-only by design
 
-The agent **cannot place, modify or cancel orders**. The custom MCP server only implements read-only tools, and a tool allowlist guardrail rejects any other tool call. There is no code path to trading.
+The agent **cannot place, modify or cancel orders**:
+
+1. The custom MCP server implements only `get_portfolio`, `get_quote` and `get_historical_candles`.
+2. The client drops any other tool the server might expose before the agent sees it.
+3. Every call is checked against the allowlist at run time. The tests prove an injected `place_order` tool is rejected at both points.
 
 ---
 
@@ -31,38 +35,45 @@ The agent **cannot place, modify or cancel orders**. The custom MCP server only 
 ```mermaid
 flowchart TB
     User(["User"])
-    UI["Streamlit dashboard<br/>holdings, alerts, charts,<br/>IPOs, reasoning trace"]
-    SCH["APScheduler<br/>price-drop polling<br/>market hours only"]
-    AG["LangGraph agent<br/>typed state graph"]
-    LLM["Hosted LLM<br/>Claude or OpenAI"]
-    OUT{{"Output guardrails<br/>groundedness check<br/>Pydantic schema<br/>prediction disclaimer"}}
+    UI["Streamlit dashboard<br/>holdings, alerts, charts,<br/>IPOs, Ask, reasoning trace"]
+    SCH["APScheduler monitor<br/>price-drop polling<br/>market hours only"]
+    AG["LangGraph report agent<br/>typed state graph"]
+    QA["Q&A assistant<br/>LLM function calling<br/>max 6 steps"]
+    LLM["Hosted LLM<br/>Anthropic Claude"]
+    OUT{{"Output guardrails<br/>groundedness check<br/>Pydantic schema<br/>prediction label"}}
     G1{{"Tool allowlist<br/>guardrail"}}
     MCP["Custom MCP server, FastMCP<br/>get_portfolio<br/>get_quote<br/>get_historical_candles"]
     BLOCKED["place / modify / cancel order<br/>NOT IMPLEMENTED"]
-    RET["RAG retriever<br/>last 6 months, top-k"]
+    RET["RAG retriever<br/>symbol + last 6 months, top-k"]
     VDB[("Chroma vector store<br/>symbol, source_url, date")]
     ING["Ingest pipeline<br/>sanitize, chunk,<br/>embed with MiniLM on CPU"]
-    IPOF["IPO fetcher"]
+    IPOF["IPO fetcher<br/>+ listing heuristic"]
     GROWW[("Groww official API<br/>growwapi SDK")]
-    NEWS[("News RSS<br/>NSE / BSE disclosures")]
-    IPOS[("Public IPO pages")]
+    NEWS[("Google News RSS")]
+    IPOS[("NSE IPO API")]
+    ALERTS[("storage/alerts.json")]
 
     User --> UI
     UI -->|"generate report"| AG
-    SCH -->|"scheduled run"| AG
-    AG <-->|"reasoning"| LLM
+    UI -->|"ask"| QA
+    AG <-->|"summaries"| LLM
+    QA <-->|"tool calls"| LLM
     AG -->|"tool calls"| G1
-    AG -->|"query"| RET
-    AG --> IPOF
+    QA -->|"tool calls"| G1
+    SCH -->|"polls"| G1
     G1 -->|"allowed"| MCP
     G1 -.->|"rejected"| BLOCKED
     MCP --> GROWW
+    AG -->|"query"| RET
     RET --> VDB
     NEWS --> ING
     ING --> VDB
+    AG --> IPOF
     IPOF --> IPOS
     AG -->|"draft report"| OUT
     OUT -.->|"validated report + trace"| UI
+    SCH --> ALERTS
+    ALERTS -.-> UI
 
     classDef present fill:#e3f2fd,stroke:#1e88e5,color:#0d47a1
     classDef orch fill:#ede7f6,stroke:#5e35b1,color:#311b92
@@ -71,32 +82,33 @@ flowchart TB
     classDef ext fill:#eceff1,stroke:#546e7a,color:#263238
     classDef blocked fill:#fde2e2,stroke:#c0392b,color:#c0392b,stroke-dasharray: 5 5
     class User,UI,SCH present
-    class AG,LLM orch
+    class AG,QA,LLM orch
     class G1,OUT guard
     class MCP,RET,VDB,ING,IPOF tool
-    class GROWW,NEWS,IPOS ext
+    class GROWW,NEWS,IPOS,ALERTS ext
     class BLOCKED blocked
 ```
 
-**Legend:** blue = presentation and control, purple = orchestration, yellow = guardrails, green = tools and knowledge, grey = external read-only sources, red dashed = deliberately not implemented.
+**Legend:** blue = presentation and control, purple = orchestration, yellow = guardrails, green = tools and knowledge, grey = external sources and storage, red dashed = deliberately not implemented.
 
 ### Agent graph
 
 ```mermaid
 flowchart TD
     START(["START"]) --> FP["fetch_portfolio<br/>MCP: get_portfolio, get_quote"]
-    FP --> PD["detect_price_drops<br/>compare against thresholds"]
-    PD --> RN["retrieve_news<br/>RAG query per holding"]
-    RN --> SP["summarize_performance<br/>MCP: get_historical_candles<br/>metrics in Python, narrative by LLM"]
-    SP --> IPO["fetch_ipo_calendar"]
-    IPO --> EST["estimate_listing_range<br/>heuristic range + assumptions"]
-    EST --> SC{"self_check<br/>groundedness + schema"}
-    SC -->|"pass"| CR["compile_report"]
-    SC -->|"fail, retries < max"| RN
-    SC -->|"fail, retries = max"| FLAG["flag as partially unverified"]
-    FLAG --> CR
+    FP --> FH["fetch_history<br/>MCP: get_historical_candles<br/>metrics in Python"]
+    FH --> PD["detect_price_drops<br/>day and 5-session change"]
+    PD --> RN["retrieve_news<br/>optional ingest, then RAG per holding"]
+    RN --> SP["summarize_performance<br/>LLM, or template without a key"]
+    SP --> SC{"self_check<br/>groundedness"}
+    SC -->|"fail, retries < max"| SP
+    SC -->|"pass, or retries = max<br/>(flag as partially unverified)"| IPO["fetch_ipo_calendar"]
+    IPO --> EST["estimate_listing_range<br/>heuristic range + assumptions + label"]
+    EST --> CR["compile_report<br/>Pydantic schema validation"]
     CR --> END(["END"])
 ```
+
+On a retry, only the failing summaries are rewritten, and the LLM is told exactly which numbers weren't grounded.
 
 ### Request sequence
 
@@ -126,25 +138,26 @@ sequenceDiagram
     RAG-->>AG: chunks with sources
     AG->>LLM: write narrative from metrics + chunks
     LLM-->>AG: draft
-    AG->>GR: groundedness + schema + disclaimer
+    AG->>GR: groundedness check
     alt checks pass
         GR-->>AG: valid
     else checks fail
-        GR-->>AG: invalid, retry up to max
+        GR-->>AG: invalid, rewrite up to max retries
     end
+    AG->>GR: schema validation + disclaimer
     AG-->>UI: report + trace
     UI-->>U: dashboard
 ```
 
 | Concept | How it's used |
 |---|---|
-| **MCP** | A self-built FastMCP server wraps the official `growwapi` SDK and exposes only `get_portfolio`, `get_quote` and `get_historical_candles`. No third-party MCP servers. |
-| **RAG** | Company news and NSE/BSE disclosures are chunked, embedded and stored in Chroma with source and date metadata, so performance narratives cite real sources. |
-| **LangGraph agent** | A typed state graph orchestrates data fetching, analysis, retrieval and report compilation, with conditional edges for retries. |
-| **Tool calling** | MCP tools are loaded into the agent through `langchain-mcp-adapters`, with Pydantic-validated inputs and outputs. |
-| **Guardrails** | A tool allowlist, a groundedness check (every number must trace to tool or computed data), Pydantic-structured reports and automatic disclaimers on predictions. |
-| **Loop engineering** | A self-check loop regenerates or re-retrieves when grounding fails (capped iterations), plus a scheduled polling loop for price-drop monitoring. |
-| **Streamlit** | Dashboard for holdings, alerts, charts, IPOs and the reasoning trace. |
+| **MCP** | A self-built FastMCP server (`mcp_server/groww_server.py`) wraps the official `growwapi` SDK and exposes three read-only tools. No third-party MCP servers. |
+| **RAG** | Google News headlines per holding are sanitized, chunked, embedded locally and stored in Chroma with symbol, source and date metadata. Retrieval filters by symbol and the last 6 months. |
+| **LangGraph agent** | `agent/graph.py`: a typed state graph of 9 nodes with a conditional retry edge. |
+| **Tool / function calling** | MCP tools are loaded through `langchain-mcp-adapters`. The report agent calls them directly, and the Q&A assistant (`agent/assistant.py`) lets the LLM choose which tool to call. |
+| **Guardrails** | `agent/guardrails.py`: tool allowlist, content sanitization, groundedness check, Pydantic schema validation and prediction labels. |
+| **Loop engineering** | The self-check loop (capped by `MAX_SELF_CHECK_RETRIES`), the assistant's tool loop (capped at 6 steps) and the scheduled polling loop. |
+| **Streamlit** | `app.py`: Portfolio, Alerts, Performance, IPOs, Ask and Trace tabs. |
 
 ---
 
@@ -152,12 +165,11 @@ sequenceDiagram
 
 - Python 3.12
 - [LangGraph](https://github.com/langchain-ai/langgraph) and [langchain-mcp-adapters](https://github.com/langchain-ai/langchain-mcp-adapters)
-- [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) (FastMCP)
+- [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) 1.x (FastMCP). `langchain-mcp-adapters` 0.3.1 doesn't work with `mcp` 2.x, so `mcp` is pinned to 1.30.0.
 - [growwapi](https://pypi.org/project/growwapi/), the official Groww SDK
 - ChromaDB and sentence-transformers (`all-MiniLM-L6-v2`) for embeddings
-- Streamlit
-- Pydantic and APScheduler
-- A hosted LLM (Anthropic Claude or OpenAI)
+- Anthropic Claude through `langchain-anthropic` (optional)
+- Streamlit and Plotly, Pydantic, APScheduler
 
 No GPU is required. Everything runs locally on CPU, and the LLM is called over an API.
 
@@ -168,23 +180,26 @@ No GPU is required. Everything runs locally on CPU, and the LLM is called over a
 ```
 StockRecommendationSystem/
 ├── mcp_server/
-│   └── groww_server.py      # Read-only MCP tools over growwapi
+│   ├── groww_server.py      # Read-only MCP tools over growwapi (mock or live provider)
+│   └── mock_data.py         # Deterministic sample portfolio with scripted price drops
 ├── agent/
-│   ├── graph.py             # LangGraph state and nodes
-│   └── guardrails.py        # Allowlist, groundedness, disclaimers
+│   ├── graph.py             # LangGraph report agent: state, nodes, retry loop
+│   ├── assistant.py         # Q&A with LLM function calling and a capped tool loop
+│   ├── guardrails.py        # Allowlist, sanitization, groundedness, disclaimers
+│   ├── analysis.py          # P&L, 6-month metrics, price-drop detection (pure Python)
+│   ├── schemas.py           # Pydantic report schema
+│   └── mcp_client.py        # Starts the MCP server over stdio and loads its tools
 ├── rag/
-│   ├── ingest.py            # Fetch, chunk and embed news/filings
-│   └── retriever.py
+│   ├── ingest.py            # Fetch, sanitize, chunk and embed news into Chroma
+│   └── retriever.py         # Symbol- and date-filtered retrieval
 ├── data/
-│   └── ipo_fetcher.py       # IPO calendar source
+│   └── ipo_fetcher.py       # NSE IPO calendar and listing-range heuristic
 ├── scheduler/
-│   └── monitor.py           # Price-drop polling loop
-├── tests/
-│   ├── test_config.py       # Settings loading and validation
-│   └── test_environment.py  # Dependencies and modules import cleanly
-├── app.py                   # Streamlit entry point
+│   └── monitor.py           # Price-drop polling loop and alert store
+├── tests/                   # Unit, integration and environment tests
+├── app.py                   # Streamlit dashboard
 ├── config.py                # Loads and validates settings from .env
-├── requirements.txt
+├── requirements.txt         # Pinned versions
 ├── pytest.ini
 ├── .python-version          # Python 3.12
 ├── .env.example
@@ -198,9 +213,9 @@ StockRecommendationSystem/
 
 ### Prerequisites
 
-1. **Groww API access.** Generate an API key and secret from the Groww developer portal. Access tokens expire daily, and the MCP server handles refresh.
-2. **LLM API key** from Anthropic or OpenAI.
-3. **Python 3.12** and [uv](https://github.com/astral-sh/uv) (or pip).
+1. **Python 3.12** and [uv](https://github.com/astral-sh/uv) (or pip).
+2. Optional: an **Anthropic API key** for LLM-written summaries and the Ask tab.
+3. Optional: **Groww API access** (key and secret from the Groww developer portal) to use your real portfolio. Access tokens expire daily, and the MCP server refreshes them.
 
 ### Installation
 
@@ -235,58 +250,80 @@ cp .env.example .env
 |---|---|---|
 | `GROWW_API_KEY` | | Groww API key. Not needed in mock mode. |
 | `GROWW_API_SECRET` | | Groww API secret. Not needed in mock mode. |
-| `ANTHROPIC_API_KEY` | | LLM API key |
-| `LLM_MODEL` | `claude-sonnet-5-5` | Model used by the agent |
+| `ANTHROPIC_API_KEY` | | LLM key. Without it, summaries use templates and Ask is disabled. |
+| `LLM_MODEL` | `claude-sonnet-5-5` | Model used for summaries and Ask |
 | `USE_MOCK_GROWW` | `true` | Use sample portfolio data instead of the Groww API |
-| `PRICE_DROP_THRESHOLD_PCT` | `5` | Default price-drop alert threshold |
-| `POLL_INTERVAL_MINUTES` | `15` | Price-drop polling cadence |
+| `PRICE_DROP_THRESHOLD_PCT` | `5` | Price-drop alert threshold |
+| `POLL_INTERVAL_MINUTES` | `15` | Monitor polling cadence |
 | `MAX_SELF_CHECK_RETRIES` | `3` | Cap on the self-check loop |
 | `CHROMA_PERSIST_DIR` | `storage/chroma` | Where the vector store is saved |
 | `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Local embedding model for RAG |
 
 `config.py` validates these at startup and reports any missing credentials. Never commit `.env`. Credentials are read from environment variables and are never logged or displayed.
 
-### Run
+### Run the dashboard
 
 ```bash
 streamlit run app.py
 ```
 
-Open http://localhost:8501. Right now the dashboard shows setup status (data source, model, threshold and any missing credentials). The portfolio, alert, IPO and trace views are added phase by phase.
+Open http://localhost:8501 and click **Generate report** in the sidebar. Options:
+
+- **Ground summaries in news (RAG):** retrieve stored news for each holding. The first run downloads the embedding model (about 90 MB) and takes a minute or two.
+- **Fetch fresh news first:** pull recent headlines from Google News into the vector store before the report.
+- **IPO data:** live from NSE, sample data, or off.
+
+### Run the price-drop monitor
+
+```bash
+python -m scheduler.monitor
+```
+
+This polls every `POLL_INTERVAL_MINUTES` during NSE market hours (09:15–15:30 IST, Monday to Friday; exchange holidays aren't modelled) and writes new alerts to `storage/alerts.json`, which the Alerts tab shows. You'll get at most one alert per holding, window and day. Use `--once` to poll a single time, and add `--force` to poll outside market hours.
+
+### Other entry points
+
+```bash
+python -m rag.ingest                 # ingest news for every holding without generating a report
+python -m mcp_server.groww_server    # run the MCP server on stdio, e.g. for MCP Inspector or Claude Desktop
+```
+
+### Mock mode
+
+Mock mode is on by default (`USE_MOCK_GROWW=true`). The MCP server then serves a deterministic five-stock portfolio with the same tool signatures as the real API. It has scripted moves, so the alerts fire: INFY drops 6.2% on the day and ITC drops 7.5% over 5 sessions.
+
+Mock prices are synthetic, but news is fetched live, so headlines will quote real prices that don't match the mock ones. Set `USE_MOCK_GROWW=false` once your Groww credentials are in `.env`.
 
 ### Test
 
 ```bash
-pytest
+pytest                    # 79 fast unit tests, about 15 seconds
+pytest -m integration     # starts the real MCP server over stdio
+pytest -m env             # checks every dependency imports (slow: PyTorch)
 ```
-
-The tests check that settings load and validate correctly, and that every dependency and project module imports.
-
-### Mock mode
-
-Mock mode is on by default (`USE_MOCK_GROWW=true`), so you can develop without Groww API access. Once the MCP server lands, it returns sample portfolio data with the same tool signatures as the real API. Set it to `false` when your Groww credentials are ready.
 
 ---
 
 ## Guardrails in detail
 
-| Guardrail | Type | Behavior |
+| Guardrail | Stage | Behavior |
 |---|---|---|
-| Tool allowlist | Pre-execution | Rejects any tool not in `{get_portfolio, get_quote, get_historical_candles}` |
-| Content sanitization | Input | Strips instruction-like text from retrieved news to reduce prompt-injection risk |
-| Groundedness check | Output | Every number in a narrative must match tool output or a Python-computed metric, or the report fails validation |
-| Structured output | Output | Reports are validated against a Pydantic schema |
-| Prediction disclaimer | Output | Any estimate is labeled as illustrative, with its range and assumptions |
+| Tool allowlist | Load time and every call | Only `get_portfolio`, `get_quote` and `get_historical_candles` are loaded or callable. Anything else is dropped or blocked and logged. |
+| Content sanitization | Before embedding | Strips HTML, removes role-tag blocks such as `<system>…</system>`, and drops instruction-like sentences ("ignore previous instructions", "you are now", ...) |
+| Groundedness check | After each summary and each Ask answer | Every number must be a rounding of a tool value, a Python-computed metric or a number in a retrieved source. Small counts, days and years are exempt. Failing summaries are rewritten up to the retry cap, then flagged as partially unverified. |
+| Schema validation | Before display | The report must validate against the Pydantic schema and carry the standard disclaimer. |
+| Prediction label | IPO estimates | Every estimate must have an ordered range, its assumptions and the "Illustrative estimate, not financial advice" label, or validation fails. |
+
+Prices and metrics are always computed in Python, never by the LLM. That's what makes the groundedness check simple and reliable.
 
 ---
 
-## Roadmap
+## Known limitations
 
-- [ ] **Phase 1:** Read-only MCP server, LangGraph skeleton and Streamlit portfolio view
-- [ ] **Phase 2:** Price-drop alerts, guardrails and self-check loop
-- [ ] **Phase 3:** RAG pipeline and grounded 6-month performance summaries
-- [ ] **Phase 4:** IPO tracker and listing-price range estimation
-- [ ] **Phase 5:** Reasoning trace panel, scheduling, tests and documentation
+- The news corpus is Google News headlines, not full articles or exchange filings.
+- The IPO listing range is a simple subscription-multiple heuristic, not a model. NSE doesn't publish price bands for BSE-listed SME issues, so those get no estimate.
+- The monitor doesn't know about exchange holidays.
+- One user and one portfolio.
 
 ### Out of scope
 
